@@ -28,7 +28,7 @@ jobs:
           MIN_AVG_VOL: "200000"
           VOL_RATIO_THRESHOLD: "3.0"
           PCT_CHANGE_MIN: "5.0"
-          NEWS_LOOKBACK_DAYS: "2"
+          NEWS_LOOKBACK_DAYS: "0"
         run: |
           python scanner.py
       - name: Upload CSV artifact
