@@ -76,12 +76,32 @@ def scan_universe(tickers):
             })
     return pd.DataFrame(results).sort_values(["VolRatio","PctChange"], ascending=False).reset_index(drop=True)
 
-def news_flag(ticker):
+# ==== NEWS (best-effort, never crash) ====
+def news_flag(ticker: str) -> str:
+    # Respect env flag: if 0, skip quickly
     try:
-        news = yf.Ticker(ticker).news or []
-        cutoff = datetime.utcnow() - timedelta(days=NEWS_LOOKBACK_DAYS)
-        recent = [n for n in news if datetime.utcfromtimestamp(n.get("providerPublishTime", 0)) >= cutoff]
-        return "Yes" if recent else "No"
+        lookback = int(os.getenv("NEWS_LOOKBACK_DAYS", "0"))
+    except Exception:
+        lookback = 0
+    if lookback <= 0:
+        return "No"
+    try:
+        nlist = yf.Ticker(ticker).news or []
+    except Exception:
+        return "Unknown"
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=lookback)
+        for n in nlist:
+            ts = n.get("providerPublishTime") or n.get("publishedAt") or n.get("time_published")
+            if not ts:
+                continue
+            try:
+                ts_dt = datetime.utcfromtimestamp(int(ts))
+            except Exception:
+                continue
+            if ts_dt >= cutoff:
+                return "Yes"
+        return "No"
     except Exception:
         return "Unknown"
 
