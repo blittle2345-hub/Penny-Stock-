@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# AI Penny Scanner — GitHub Actions version
+# AI Penny Scanner — safe, throttled, best-effort news
+
 import os, sys, time, requests
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
-import pytz
 
 TOP_N = int(os.getenv("TOP_N", "15"))
 MIN_PRICE = float(os.getenv("MIN_PRICE", "0.25"))
@@ -12,20 +12,19 @@ MAX_PRICE = float(os.getenv("MAX_PRICE", "5.00"))
 MIN_AVG_VOL = int(os.getenv("MIN_AVG_VOL", "200000"))
 VOL_RATIO_THRESHOLD = float(os.getenv("VOL_RATIO_THRESHOLD", "3.0"))
 PCT_CHANGE_MIN = float(os.getenv("PCT_CHANGE_MIN", "5.0"))
-NEWS_LOOKBACK_DAYS = int(os.getenv("NEWS_LOOKBACK_DAYS", "2"))
+NEWS_LOOKBACK_DAYS = int(os.getenv("NEWS_LOOKBACK_DAYS", "0"))
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 def load_universe():
-    # GitHub dataset (more reliable than NASDAQ FTP)
     url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
     try:
         dfu = pd.read_csv(url)
         tickers = sorted(dfu['Symbol'].dropna().unique().tolist())
-        if len(tickers) < 50:
-            raise ValueError("ticker list too small")
+        # speed-up + avoid weird symbols
+        tickers = [t for t in tickers if t.isalpha() and len(t) <= 5]
+        tickers = tickers[:600]  # TEMP cap for speed; raise later
         return tickers
-    except Exception as e:
-        # Fallback sample list
+    except Exception:
         return ["RR","SNDL","BBIG","GME","AMC","NNDM","GNS","NAKD","CEI","MARA","RIOT"]
 
 def chunk(lst, n):
@@ -40,14 +39,12 @@ def scan_universe(tickers):
         if data is None or data.empty:
             continue
         if isinstance(data.columns, pd.MultiIndex):
-            close = data['Close']
-            vol   = data['Volume']
+            close = data['Close']; vol = data['Volume']
         else:
-            close = data[['Close']]
-            vol   = data[['Volume']]
-        for tkr in close.columns:
-            c = close[tkr].dropna()
-            v = vol[tkr].dropna()
+            close = data[['Close']]; vol = data[['Volume']]
+        for t in close.columns:
+            time.sleep(0.05)  # throttle
+            c = close[t].dropna(); v = vol[t].dropna()
             if len(c) < 5 or len(v) < 5:
                 continue
             last_px = float(c.iloc[-1])
@@ -65,7 +62,7 @@ def scan_universe(tickers):
                 continue
             hi20 = float(c.tail(20).max())
             results.append({
-                "Ticker": tkr,
+                "Ticker": t,
                 "LastPrice": round(last_px, 4),
                 "PctChange": round(pct_change, 2),
                 "AvgVol20d": int(avg20),
@@ -78,11 +75,7 @@ def scan_universe(tickers):
 
 # ==== NEWS (best-effort, never crash) ====
 def news_flag(ticker: str) -> str:
-    # Respect env flag: if 0, skip quickly
-    try:
-        lookback = int(os.getenv("NEWS_LOOKBACK_DAYS", "0"))
-    except Exception:
-        lookback = 0
+    lookback = NEWS_LOOKBACK_DAYS
     if lookback <= 0:
         return "No"
     try:
@@ -107,23 +100,24 @@ def news_flag(ticker: str) -> str:
 
 def format_discord(df, top_n=10):
     if df is None or df.empty:
-        return "**Penny Scan Alert**\\nNo candidates today."
+        return "**Penny Scan Alert**\nNo candidates today."
     df = df.head(top_n).copy()
     lines = ["**Penny Scan Alert**"]
     for _, r in df.iterrows():
         lines.append(
-            (f"\\n**{r['Ticker']}**  ${r['LastPrice']} | "
+            (f"\n**{r['Ticker']}**  ${r['LastPrice']} | "
              f"Entry {r['Entry']} | Stop {r['Stop']} | T1 {r['Target1']} | T2 {r['Target2']} | "
-             f"Vol× {r['VolRatio']} | Chg {r['PctChange']}% | News48h {r['RecentNews48h']}")
+             f"Vol× {r['VolRatio']} | Chg {r['PctChange']}% | News48h {r.get('RecentNews48h','No')}")
         )
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 def main():
     tickers = load_universe()
     scan = scan_universe(tickers)
-
     if not scan.empty:
-        scan["RecentNews48h"] = scan["Ticker"].apply(news_flag)
+        # optional news flag (respects env=0)
+        scan["RecentNews48h"] = scan["Ticker"].apply(news_flag) if NEWS_LOOKBACK_DAYS > 0 else "No"
+        # plan
         def plan_rows(r):
             px = r["LastPrice"]
             entry = round(max(MIN_PRICE, px * 0.97), 4)
@@ -137,12 +131,11 @@ def main():
         out_csv = f"penny_scan_simple_{datetime.utcnow().date()}.csv"
         scan.head(TOP_N).to_csv(out_csv, index=False)
         print("Saved:", out_csv)
-        # Post to Discord
         if DISCORD_WEBHOOK_URL:
             msg = format_discord(scan, top_n=min(TOP_N, 10))
             try:
                 r = requests.post(DISCORD_WEBHOOK_URL, json={"content": msg[:1900]}, timeout=20)
-                print("Discord status:", r.status_code, r.text[:120])
+                print("Discord status:", r.status_code)
             except Exception as e:
                 print("Discord post error:", e)
         else:
@@ -151,8 +144,8 @@ def main():
         print("No candidates found today.")
         if DISCORD_WEBHOOK_URL:
             try:
-                r = requests.post(DISCORD_WEBHOOK_URL, json={"content": "**Penny Scan Alert**\\nNo candidates today."}, timeout=20)
-                print("Discord status:", r.status_code, r.text[:120])
+                r = requests.post(DISCORD_WEBHOOK_URL, json={"content": "**Penny Scan Alert**\nNo candidates today."}, timeout=20)
+                print("Discord status:", r.status_code)
             except Exception as e:
                 print("Discord post error:", e)
 
